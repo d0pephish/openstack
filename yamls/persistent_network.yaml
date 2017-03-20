@@ -11,7 +11,7 @@ parameters:
   root_password:
     type: string
     label: Root Password
-    description: Root password for student station
+    description: Root password for resource vm
     default: "changeme"
 
 resources:
