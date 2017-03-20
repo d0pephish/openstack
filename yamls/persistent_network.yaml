@@ -1,0 +1,188 @@
+heat_template_version: "2016-10-14"
+
+description: Unit Exercise Persistent Network
+# This script creates the persistent components of the exercise network.
+# This should be deployed once to set up the environment. After this is deployed, another per-student deployment is required to build the student environment. Finally each exercise gets its own deployment script.
+# First create network, then create subnet for that network. 
+# For our uses there is a 1:1 relationship between a subnet and a network
+# final step is to create a port (think physical interface) for specific vms
+
+parameters:
+  root_password:
+    type: string
+    label: Root Password
+    description: Root password for student station
+    default: "changeme"
+
+resources:
+
+## Some randomness 
+  random-str:
+    type: OS::Heat::RandomString
+    properties:
+      length: 20
+
+#Student Workstation Network
+#Contains the student workstation
+  ex-stu-net:
+    type: OS::Neutron::Net
+    properties:
+      name: ex_stu_net
+
+  ex-stu-net-sub:
+    type: OS::Neutron::Subnet
+    properties:
+      allocation_pools:
+        - start: 172.16.0.100
+          end: 172.16.254.254
+      cidr: 172.16.0.0/16
+      gateway_ip: 172.16.0.1
+      network: { get_resource: ex-stu-net }
+      name: ex_stu_net_sub
+      dns_nameservers: [ 8.8.8.8 ]
+
+#Student Resource Network
+#Contains the server that students access for instructions for each scenario and to submit tokens after completion of exercise to unlock next scenario. 
+  ex-stu-resource-net:
+    type: OS::Neutron::Net
+    properties:
+      name: ex_stu_resource_net
+
+  ex-stu-resource-net-sub:
+    type: OS::Neutron::Subnet
+    properties:
+      allocation_pools:
+        - start: 172.17.1.0
+          end: 172.17.254.25
+      cidr: 172.17.0.0/16
+      gateway_ip: 172.17.0.254
+      network: { get_resource: ex-stu-resource-net }
+      name: ex_stu_resource_net_sub
+      dns_nameservers: [ 8.8.8.8 ]
+
+
+#Lane Resources
+#Contains the server that will host all the individual exercise configuration scripts. Only routable from within exercise lane network.
+  ex-lane-resource-net:
+    type: OS::Neutron::Net
+    properties:
+      name: ex_lane_resource_net
+
+  ex-lane-resource-net-sub:
+    type: OS::Neutron::Subnet
+    properties:
+      allocation_pools:
+        - start: 172.19.1.0
+          end: 172.19.254.25
+      cidr: 172.19.0.0/16
+      gateway_ip: 172.19.0.254
+      network: { get_resource: ex-lane-resource-net }
+      name: ex_lane_resource_net_sub
+      dns_nameservers: [ 8.8.8.8 ]
+
+
+#Exercise Lane
+#Individual exercise stacks will plug into this network 
+  ex-lane-net:
+    type: OS::Neutron::Net
+    properties:
+      name: ex_lane_net
+
+  ex-lane-net-sub:
+    type: OS::Neutron::Subnet
+    properties:
+      allocation_pools:
+        - start: 172.18.1.0
+          end: 172.18.254.25
+      cidr: 172.18.0.0/16
+      gateway_ip: 172.18.0.254
+      network: { get_resource: ex-lane-net }
+      name: ex_lane_net_sub
+      dns_nameservers: [ 8.8.8.8 ]
+
+
+### Persistent Router
+#Provides student station, student resources, and exercise lane networks routes to each other and to the internet. 
+
+
+  ex-primary-router:
+    type: OS::Neutron::Router    
+    properties:
+      name: ex_primary_router
+      external_gateway_info: {"network": public}
+
+  ex-primary-router-stu-net-interface:
+    type:  OS::Neutron::RouterInterface
+    properties:
+      router_id: { get_resource: ex-primary-router }       
+      subnet_id: { get_resource: ex-stu-net-sub }
+
+
+  ex-primary-router-lane-net-interface:
+    type:  OS::Neutron::RouterInterface
+    properties:
+      router_id: { get_resource: ex-primary-router }       
+      subnet_id: { get_resource: ex-lane-net-sub }
+
+  ex-primary-router-stu-resource-net-interface:
+    type:  OS::Neutron::RouterInterface
+    properties:
+      router_id: { get_resource: ex-primary-router }       
+      subnet_id: { get_resource: ex-stu-resource-net-sub }
+
+### Student Resource Server
+# Hosts the server the student instructions and scoreboard server
+
+# Network Ports:
+  ex-stu-resource-net-ports-stu-resource-server:
+    type: OS::Neutron::Port    
+    properties:
+      port_security_enabled: false
+      network_id: { get_resource: ex-stu-resource-net }
+      fixed_ips:
+      - subnet_id: { get_resource: ex-stu-resource-net-sub }
+        ip_address: 172.17.17.76
+
+#Server
+  ex-stu-resource-server:
+    type: OS::Nova::Server
+    properties:
+      name: ex_stu_resource_server
+      image: Debian Jessie
+      flavor: cy.small
+      networks:
+        - port: { get_resource: ex-stu-resource-net-ports-stu-resource-server }
+      user_data:
+        str_replace:
+          template: |
+            #!/bin/bash
+            echo "root:$password" | chpasswd
+            sed -i 's/localhost.*/localhost boxHostname/g' /etc/hosts
+            echo boxHostname>/etc/hostname
+            printf "${OPENVPN_CLIENT_CERT" | base64 -d | gunzip > /root/openvpnclient.ovpn
+            sleep 60 && echo "root:$password" | chpasswd && echo password successfully changed to $password|| echo failed to change password &
+            apt-get install openvpn -y && mv /root/openvpnclient.ovpn /etc/openvpn/client.conf && chmod 400 /etc/openvpn/client.conf && systemctl enable openvpn@client.service && systemctl start openvpn@client.service && sleep 60 && wget http://172.20.25.1:8080/student_resources_server.init -O - 2>/dev/null | /bin/bash
+          params:
+            $password: { get_param: root_password}
+            boxHostname: studentResources
+      user_data_format: RAW
+
+
+
+outputs:
+ stu-net-uuid:
+    description: student network uuid
+    value: { get_resource : ex-stu-net }
+
+ stu-net-sub-uuid:
+    description: student network subnet uuid
+    value: { get_resource : ex-stu-net-sub }
+
+ lane-net-uuid:
+    description: exercise lane net uuid
+    value: { get_resource : ex-lane-net }
+
+ lane-net-sub-uuid:
+    description: exercise lane net sub uuid
+    value: { get_resource : ex-lane-net-sub }
+
